@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import XCTest
 @testable import Backtrace
 
@@ -174,6 +175,45 @@ final class BacktraceCoreTests: XCTestCase {
         XCTAssertEqual(sessions.count, 2)
         XCTAssertEqual(Set(sessions.map(\.id)).count, 2)
         XCTAssertEqual(sessions.first(where: { $0.configDirectory?.isDefault == true })?.id, "claude:\(id)")
+    }
+
+    func testProvidersFollowASymlinkedSessionsRoot() throws {
+        let fixture = try FixtureDirectory()
+        let id = "a9c1570b-8550-45ca-b388-8417a7a8bd16"
+        try fixture.writeClaudeSession(id: id, configDirectory: "Sync/claude")
+        let config = fixture.url.appendingPathComponent(".claude", isDirectory: true)
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: config.appendingPathComponent("projects"),
+            withDestinationURL: fixture.url.appendingPathComponent("Sync/claude/projects", isDirectory: true)
+        )
+
+        let directory = ClaudeConfigDirectory(url: config, source: .defaultLocation, isDefault: true)
+        XCTAssertEqual(try ClaudeProvider(configDirectories: [directory]).sessions().map(\.sessionID), [id])
+    }
+
+    func testClaudeProfilesSharingOneSymlinkedProjectsFolderListEachSessionOnce() throws {
+        let fixture = try FixtureDirectory()
+        let id = "a9c1570b-8550-45ca-b388-8417a7a8bd16"
+        try fixture.writeClaudeSession(id: id, configDirectory: ".claude")
+        let other = fixture.url.appendingPathComponent(".claude-other", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: other.appendingPathComponent("projects"),
+            withDestinationURL: fixture.url.appendingPathComponent(".claude/projects", isDirectory: true)
+        )
+
+        let provider = ClaudeProvider(configDirectories: [
+            ClaudeConfigDirectory(
+                url: fixture.url.appendingPathComponent(".claude", isDirectory: true),
+                source: .defaultLocation,
+                isDefault: true
+            ),
+            ClaudeConfigDirectory(url: other, source: .environment, isDefault: false)
+        ])
+
+        let sessions = try provider.sessions()
+        XCTAssertEqual(sessions.map(\.id), ["claude:\(id)"])
     }
 
     func testLoginShellEnvironmentReadsInteractiveZshConfiguration() throws {
@@ -406,6 +446,29 @@ final class BacktraceCoreTests: XCTestCase {
         XCTAssertEqual(value.title, "Review architecture")
         XCTAssertEqual(value.projectPath, "/tmp/open-code")
         XCTAssertEqual(value.resumeCommand, "cd '/tmp/open-code' && opencode --session 'ses_example'")
+    }
+
+    func testOpenCodeProviderReadsSessionsFromItsDatabase() throws {
+        let fixture = try FixtureDirectory()
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(fixture.url.appendingPathComponent("opencode.db").path, &handle), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(handle, """
+        CREATE TABLE session (id text PRIMARY KEY, parent_id text, directory text, title text, model text,
+            time_created integer, time_updated integer, time_archived integer);
+        INSERT INTO session VALUES ('ses_root', NULL, '/tmp/client', 'Fix the parser',
+            '{"id":"qwen3","providerID":"ollama"}', 1791560723000, 1791574849000, NULL);
+        INSERT INTO session VALUES ('ses_child', 'ses_root', '/tmp/client', 'Subagent', NULL,
+            1791560723000, 1791574849000, NULL);
+        """, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(handle)
+
+        let sessions = try OpenCodeProvider(root: fixture.url, home: fixture.url).sessions()
+        XCTAssertEqual(sessions.map(\.sessionID), ["ses_root"])
+        let value = try XCTUnwrap(sessions.first)
+        XCTAssertEqual(value.title, "Fix the parser")
+        XCTAssertEqual(value.model, "qwen3")
+        XCTAssertEqual(value.updatedAt, Date(timeIntervalSince1970: 1_791_574_849))
+        XCTAssertEqual(value.resumeCommand, "cd '/tmp/client' && opencode --session 'ses_root'")
     }
 
     func testTranscriptLoaderReturnsOnlyConversationMessages() async throws {

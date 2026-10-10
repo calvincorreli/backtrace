@@ -19,6 +19,9 @@ enum FileMetadata {
         extensions: Set<String>,
         excludingPathComponents: Set<String> = []
     ) -> [URL] {
+        // The enumerator yields nothing for a root that is itself a symlink,
+        // which is how histories synced from another folder are laid out.
+        let root = root.resolvingSymlinksInPath()
         guard FileManager.default.fileExists(atPath: root.path) else { return [] }
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isHiddenKey]
         guard let enumerator = FileManager.default.enumerator(

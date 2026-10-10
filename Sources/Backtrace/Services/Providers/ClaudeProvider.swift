@@ -13,7 +13,13 @@ struct ClaudeProvider: SessionProvider {
     }
 
     func sessions() throws -> [AssistantSession] {
-        configDirectories.flatMap { directory in
+        // Profiles can symlink their `projects` folder to one shared history.
+        // Read each real folder once, under the first profile that lists it.
+        var seenRoots: Set<String> = []
+        let directories = configDirectories.filter {
+            seenRoots.insert($0.projectsRoot.resolvingSymlinksInPath().path).inserted
+        }
+        return directories.flatMap { directory in
             FileMetadata.files(
                 below: directory.projectsRoot,
                 extensions: ["jsonl"],
