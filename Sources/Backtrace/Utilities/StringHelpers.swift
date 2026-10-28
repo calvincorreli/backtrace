@@ -25,6 +25,7 @@ extension String {
         let ignoredPrefixes = [
             "<environment_context>",
             "<system-reminder>",
+            "<user_info>",
             "<permissions instructions>",
             "# AGENTS.md instructions"
         ]

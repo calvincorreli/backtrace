@@ -26,6 +26,8 @@
     <string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Backtrace opens a terminal tab to continue a session in another assistant.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>

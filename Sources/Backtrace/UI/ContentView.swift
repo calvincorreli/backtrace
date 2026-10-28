@@ -3,7 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var store: SessionStore
-    private let refreshTimer = Timer.publish(every: 120, on: .main, in: .common).autoconnect()
+    private let refreshTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     var body: some View {
         NavigationSplitView {
@@ -25,6 +25,14 @@ struct ContentView: View {
         }
         .onReceive(refreshTimer) { _ in
             Task { await store.refresh() }
+        }
+        .alert("Something Went Wrong", isPresented: Binding(
+            get: { store.handoffError != nil },
+            set: { if !$0 { store.handoffError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.handoffError ?? "")
         }
         .onChange(of: store.visibleSessions.map(\.id)) { _, ids in
             if let selected = store.selectedSessionID, ids.contains(selected) { return }

@@ -37,31 +37,46 @@ struct AssistantSession: Identifiable, Hashable, Sendable {
         return "\(base):\(configDirectory.id)"
     }
 
+    /// A session counts as active while its transcript is still being written.
+    static let activeWindow: TimeInterval = 180
+
+    func isActive(at now: Date = Date()) -> Bool {
+        now.timeIntervalSince(updatedAt) < Self.activeWindow
+    }
+
     var projectName: String {
         guard let projectPath, !projectPath.isEmpty else { return "Unknown project" }
         return URL(fileURLWithPath: projectPath).lastPathComponent
     }
 
-    var resumeCommand: String {
+    var resumeCommand: String { resumeCommand(launcher: nil) }
+
+    /// The command that resumes this session. A launcher is a shell alias for
+    /// the assistant; it replaces the executable and carries its own settings.
+    func resumeCommand(launcher: String?) -> String {
+        let id = sessionID.shellQuoted
         let launch: String
         switch assistant {
         case .codex:
-            if isArchived {
-                launch = "codex unarchive \(sessionID.shellQuoted) && codex resume \(sessionID.shellQuoted)"
-            } else {
-                launch = "codex resume \(sessionID.shellQuoted)"
-            }
+            let codex = launcher ?? "codex"
+            launch = isArchived
+                ? "codex unarchive \(id) && \(codex) resume \(id)"
+                : "\(codex) resume \(id)"
         case .claude:
-            // Claude Code reads one config directory at a time, so a session
-            // from a non-default profile only resumes with the variable set.
-            let scope = configDirectory.flatMap { directory in
-                directory.isDefault ? nil : "CLAUDE_CONFIG_DIR=\(directory.url.path.shellQuoted) "
-            } ?? ""
-            launch = "\(scope)claude --resume \(sessionID.shellQuoted)"
+            if let launcher {
+                launch = "\(launcher) --resume \(id)"
+            } else {
+                // Claude Code reads one config directory at a time, so a session
+                // from a non-default profile only resumes with the variable set.
+                let scope = configDirectory.flatMap { directory in
+                    directory.isDefault ? nil : "CLAUDE_CONFIG_DIR=\(directory.url.path.shellQuoted) "
+                } ?? ""
+                launch = "\(scope)claude --resume \(id)"
+            }
         case .grok:
-            launch = "grok --resume \(sessionID.shellQuoted)"
+            launch = "\(launcher ?? "grok") --resume \(id)"
         case .openCode:
-            launch = "opencode --session \(sessionID.shellQuoted)"
+            launch = "\(launcher ?? "opencode") --session \(id)"
         }
 
         guard let projectPath, !projectPath.isEmpty else { return launch }

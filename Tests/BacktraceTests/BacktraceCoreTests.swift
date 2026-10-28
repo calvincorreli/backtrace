@@ -433,6 +433,269 @@ final class BacktraceCoreTests: XCTestCase {
         XCTAssertEqual(value.resumeCommand, "cd '/tmp/grok-project' && grok --resume 'f0f46d28-254e-44a4-bc35-fb5b18a67c68'")
     }
 
+    func testGrokProviderReadsSummaryAndHidesUnusedSessions() throws {
+        let fixture = try FixtureDirectory()
+        let project = fixture.url.appendingPathComponent("%2Ftmp%2Fgrok-project", isDirectory: true)
+        func writeSession(_ id: String, summary: String) throws {
+            let folder = project.appendingPathComponent(id, isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try summary.write(to: folder.appendingPathComponent("summary.json"), atomically: true, encoding: .utf8)
+            try """
+            {"type":"system","content":"You are Grok."}
+            {"type":"user","content":[{"type":"text","text":"<user_info>\\nOS Version: macos\\n</user_info>"}]}
+            """.write(to: folder.appendingPathComponent("chat_history.jsonl"), atomically: true, encoding: .utf8)
+            // The newer of the summary date and the transcript's own date wins.
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+                ofItemAtPath: folder.appendingPathComponent("chat_history.jsonl").path
+            )
+        }
+        try writeSession("01a1237e-22a4-7b22-bd04-c0e7c8c656cd", summary: """
+        {"info":{"id":"01a1237e-22a4-7b22-bd04-c0e7c8c656cd","cwd":"/tmp/grok-project"},"generated_title":"Install session browsers","created_at":"2026-10-10T01:47:11.426684Z","updated_at":"2026-10-10T03:18:47.791389Z","num_chat_messages":118,"current_model_id":"grok-4.7","head_branch":"master","last_recap":"We installed two browsers."}
+        """)
+        try writeSession("01a1237e-0000-7b22-bd04-c0e7c8c656cd", summary: """
+        {"info":{"id":"01a1237e-0000-7b22-bd04-c0e7c8c656cd","cwd":"/tmp/grok-project"},"session_summary":"","num_chat_messages":2}
+        """)
+        try writeSession("01a1237e-1111-7b22-bd04-c0e7c8c656cd", summary: """
+        {"info":{"id":"01a1237e-1111-7b22-bd04-c0e7c8c656cd","cwd":"/tmp/grok-project"},"session_summary":"","num_chat_messages":2}
+        """)
+        try """
+        {"timestamp":"2026-10-10T02:10:33Z","session_id":"01a1237e-1111-7b22-bd04-c0e7c8c656cd","prompt":"Fix the scanner","is_bash":false}
+        """.write(to: project.appendingPathComponent("prompt_history.jsonl"), atomically: true, encoding: .utf8)
+
+        let sessions = try GrokProvider(roots: [fixture.url]).sessions().sorted { $0.sessionID < $1.sessionID }
+        XCTAssertEqual(sessions.map(\.title), ["Fix the scanner", "Install session browsers"])
+        let titled = try XCTUnwrap(sessions.last)
+        XCTAssertEqual(titled.projectName, "grok-project")
+        XCTAssertEqual(titled.gitBranch, "master")
+        XCTAssertEqual(titled.model, "grok-4.7")
+        XCTAssertEqual(titled.messageCount, 118)
+        XCTAssertEqual(titled.summary, "We installed two browsers.")
+        XCTAssertEqual(titled.sourceURL.lastPathComponent, "chat_history.jsonl")
+        XCTAssertEqual(titled.updatedAt.timeIntervalSince1970, 1_791_602_327.791, accuracy: 0.01)
+    }
+
+    func testSessionHandoffKeepsTypedConversationAndBuildsLaunchCommand() throws {
+        let session = AssistantSession(
+            assistant: .grok,
+            sessionID: "01a1237e-22a4-7b22-bd04-c0e7c8c656cd",
+            title: "Install session browsers",
+            summary: "We installed two browsers.",
+            projectPath: "/tmp/grok project",
+            gitBranch: "master",
+            model: "grok-4.7",
+            createdAt: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_791_602_327),
+            messageCount: 4,
+            fileSize: 0,
+            sourceURL: URL(fileURLWithPath: "/tmp/sessions/chat_history.jsonl"),
+            sourceFormat: .grokJSON,
+            isArchived: false
+        )
+        func entry(_ role: TranscriptRole, _ text: String) -> TranscriptEntry {
+            TranscriptEntry(id: UUID().uuidString, role: role, text: text, timestamp: nil)
+        }
+        let transcript = TranscriptPreview(entries: [
+            entry(.system, "You are Grok."),
+            entry(.user, "<user_info>\nOS Version: macos\n</user_info>"),
+            entry(.user, "<user_query>\nInstall both browsers\n</user_query>"),
+            entry(.tool, "exit: 0"),
+            entry(.assistant, "Both are installed.")
+        ], isTruncated: false)
+
+        XCTAssertEqual(SessionHandoff.messages(from: transcript.entries), [
+            .init(role: .user, text: "Install both browsers"),
+            .init(role: .assistant, text: "Both are installed.")
+        ])
+
+        let document = SessionHandoff.document(for: session, transcript: transcript)
+        XCTAssertTrue(document.hasPrefix("# Handoff: Install session browsers\n"))
+        XCTAssertTrue(document.contains("- Assistant: Grok Build (grok-4.7)"))
+        XCTAssertTrue(document.contains("## Summary\n\nWe installed two browsers."))
+        XCTAssertTrue(document.contains("### User\n\nInstall both browsers\n\n### Grok Build\n\nBoth are installed."))
+        XCTAssertFalse(document.contains("user_info"))
+        XCTAssertFalse(document.contains("exit: 0"))
+
+        let shared = SessionHandoff.document(for: session, transcript: transcript, purpose: .share)
+        XCTAssertTrue(shared.hasPrefix("# Install session browsers\n"))
+        XCTAssertFalse(shared.contains("Continue that work here"))
+        XCTAssertFalse(shared.contains("/tmp/sessions/chat_history.jsonl"))
+        XCTAssertTrue(shared.contains("### User\n\nInstall both browsers"))
+        XCTAssertEqual(GistSharer.filename(for: session), "install-session-browsers-01a1237e.md")
+
+        let long = (0..<10).map { SessionHandoff.Message(role: .user, text: "\($0)" + String(repeating: "x", count: 99)) }
+        let (kept, omitted) = SessionHandoff.trimmed(long, budget: 350)
+        XCTAssertEqual(kept.map { $0.text.prefix(1) }, ["0", "8", "9"])
+        XCTAssertEqual(omitted, 7)
+
+        let fixture = try FixtureDirectory()
+        let file = try SessionHandoff.write(document, for: session, target: .claude, directory: fixture.url)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), document)
+        XCTAssertEqual(
+            SessionHandoff.launchCommand(for: .claude, session: session, handoffFile: file),
+            "cd '/tmp/grok project' && claude \"$(cat '\(file.path)')\""
+        )
+        XCTAssertTrue(
+            SessionHandoff.launchCommand(for: .openCode, session: session, handoffFile: file)
+                .contains("opencode --prompt \"$(cat ")
+        )
+    }
+
+    func testCodexResponseItemMessagesAreReadOnceWithoutInjectedContext() throws {
+        let fixture = try FixtureDirectory()
+        let id = "01a126f8-1c9b-73f0-905d-6858f215aee3"
+        let file = fixture.url.appendingPathComponent("rollout-2026-10-10T10-59-16-\(id).jsonl")
+        try """
+        {"timestamp":"2026-10-10T17:59:16.903Z","type":"session_meta","payload":{"id":"\(id)","cwd":"/tmp/brain","timestamp":"2026-10-10T17:59:16.903Z"}}
+        {"timestamp":"2026-10-10T17:59:17Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Developer rules"}]}}
+        {"timestamp":"2026-10-10T17:59:17Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /tmp/brain"}]}}
+        {"timestamp":"2026-10-10T17:59:18Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Copy my aliases"}]}}
+        {"timestamp":"2026-10-10T17:59:18Z","type":"event_msg","payload":{"type":"user_message","message":"Copy my aliases"}}
+        {"timestamp":"2026-10-10T17:59:19Z","type":"response_item","payload":{"type":"custom_tool_call","name":"shell","input":"ls"}}
+        {"timestamp":"2026-10-10T17:59:20Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will inspect them."}]}}
+        """.write(to: file, atomically: true, encoding: .utf8)
+
+        let session = try XCTUnwrap(
+            CodexProvider(roots: [fixture.url], indexURL: fixture.url.appendingPathComponent("none.jsonl")).sessions().first
+        )
+        XCTAssertEqual(session.title, "Copy my aliases")
+
+        let expectation = expectation(description: "transcript")
+        Task {
+            let transcript = await TranscriptLoader(installations: []).load(session)
+            XCTAssertEqual(transcript.entries.map(\.role), [.user, .assistant])
+            XCTAssertEqual(transcript.entries.map(\.text), ["Copy my aliases", "I will inspect them."])
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 5)
+    }
+
+    func testSyncthingResolverReadsConfigurationAndLocatesSyncedFiles() throws {
+        let configuration = try XCTUnwrap(SyncthingMachineResolver.parseConfiguration(Data("""
+        <configuration version="51">
+            <folder id="sync" label="Sync" path="/tmp/Sync" type="sendreceive">
+                <device id="2NKIAG5-LT2OMI5" introducedBy=""></device>
+            </folder>
+            <device id="2JHI6FF-R2TDW75-JRJ5ZEU" name="mbp-16-m5"><address>dynamic</address></device>
+            <device id="2NKIAG5-LT2OMI5-YFMH7QF" name="mbp-16-m4"><address>dynamic</address></device>
+            <gui enabled="true" tls="false"><address>127.0.0.1:8384</address><apikey>secret</apikey></gui>
+        </configuration>
+        """.utf8)))
+        XCTAssertEqual(configuration.baseURL.absoluteString, "http://127.0.0.1:8384")
+        XCTAssertEqual(configuration.apiKey, "secret")
+        XCTAssertEqual(configuration.deviceNames, ["2JHI6FF": "mbp-16-m5", "2NKIAG5": "mbp-16-m4"])
+
+        let resolver = SyncthingMachineResolver(configuration: configuration)
+        let folderPath = try XCTUnwrap(configuration.folders.first).path
+        let inside = resolver.location(of: URL(fileURLWithPath: folderPath + "/ai/grok/sessions/%2Ftmp/a/chat_history.jsonl"))
+        XCTAssertEqual(inside?.folder.id, "sync")
+        XCTAssertEqual(inside?.relativePath, "ai/grok/sessions/%2Ftmp/a/chat_history.jsonl")
+        XCTAssertNil(resolver.location(of: URL(fileURLWithPath: "/tmp/elsewhere/session.jsonl")))
+    }
+
+    func testSessionIsActiveOnlyShortlyAfterItsLastChange() {
+        func session(updatedAt: Date) -> AssistantSession {
+            AssistantSession(
+                assistant: .codex, sessionID: "01a126f8-1c9b-73f0-905d-6858f215aee3", title: "t", summary: nil,
+                projectPath: nil, gitBranch: nil, model: nil, createdAt: nil, updatedAt: updatedAt,
+                messageCount: nil, fileSize: 0, sourceURL: URL(fileURLWithPath: "/tmp/a.jsonl"),
+                sourceFormat: .codexJSONL, isArchived: false
+            )
+        }
+        let now = Date()
+        XCTAssertTrue(session(updatedAt: now.addingTimeInterval(-60)).isActive(at: now))
+        XCTAssertFalse(session(updatedAt: now.addingTimeInterval(-600)).isActive(at: now))
+    }
+
+    func testShellAliasDetectorFindsAssistantLaunchersByName() {
+        let output = """
+        cc='claude --dangerously-skip-permissions'
+        ccl='$HOME/.local/bin/sync-claude-mcp; env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=$HOME/.claude-ccl claude --dangerously-skip-permissions'
+        cdx='codex --dangerously-bypass-approvals-and-sandbox'
+        alias gg='grok --yolo'
+        oc2='env XDG_DATA_HOME=$HOME/.opencode-agent2 opencode'
+        gs='git status'
+        claudette='echo claudette'
+        """
+        let launchers = ShellAliasDetector.launchers(fromAliasOutput: output)
+        XCTAssertEqual(launchers.map(\.name), ["cc", "ccl", "cdx", "gg", "oc2"])
+        XCTAssertEqual(launchers.map(\.kind), [.claude, .claude, .codex, .grok, .openCode])
+    }
+
+    func testResumeCommandUsesLauncherAlias() {
+        func session(_ kind: AssistantKind, archived: Bool = false) -> AssistantSession {
+            AssistantSession(
+                assistant: kind, sessionID: "abc12345", title: "t", summary: nil,
+                projectPath: "/tmp/p", gitBranch: nil, model: nil, createdAt: nil, updatedAt: Date(),
+                messageCount: nil, fileSize: 0, sourceURL: URL(fileURLWithPath: "/tmp/a.jsonl"),
+                sourceFormat: .codexJSONL, isArchived: archived
+            )
+        }
+        XCTAssertEqual(session(.claude).resumeCommand(launcher: "ccl"), "cd '/tmp/p' && ccl --resume 'abc12345'")
+        XCTAssertEqual(session(.codex).resumeCommand(launcher: "cdx"), "cd '/tmp/p' && cdx resume 'abc12345'")
+        XCTAssertEqual(
+            session(.codex, archived: true).resumeCommand(launcher: "cdx"),
+            "cd '/tmp/p' && codex unarchive 'abc12345' && cdx resume 'abc12345'"
+        )
+        XCTAssertEqual(session(.grok).resumeCommand(launcher: "gg"), "cd '/tmp/p' && gg --resume 'abc12345'")
+        XCTAssertEqual(session(.openCode).resumeCommand(launcher: nil), "cd '/tmp/p' && opencode --session 'abc12345'")
+    }
+
+    func testSearchIndexFindsWordsInsideConversationsAndTracksChanges() async throws {
+        let fixture = try FixtureDirectory()
+        let index = SearchIndex(url: fixture.url.appendingPathComponent("index.sqlite"))
+        func session(_ id: String, updated: TimeInterval) -> AssistantSession {
+            AssistantSession(
+                assistant: .codex, sessionID: id, title: "Untitled", summary: nil, projectPath: nil,
+                gitBranch: nil, model: nil, createdAt: nil, updatedAt: Date(timeIntervalSince1970: updated),
+                messageCount: nil, fileSize: 10, sourceURL: URL(fileURLWithPath: "/tmp/\(id).jsonl"),
+                sourceFormat: .codexJSONL, isArchived: false
+            )
+        }
+        let first = session("01a126f8-aaaa-73f0-905d-6858f215aee3", updated: 100)
+        let second = session("01a126f8-bbbb-73f0-905d-6858f215aee3", updated: 200)
+
+        let initiallyStale = await index.staleSessions(in: [first, second])
+        XCTAssertEqual(initiallyStale.map(\.sessionID), [second.sessionID, first.sessionID])
+        await index.store(first, body: "Copy my Omarchy aliases to the PC on the tailnet")
+        await index.store(second, body: "Fix the Grok session titles")
+
+        let matches = await index.search("omarch alias")
+        XCTAssertEqual(Array(matches.keys), [first.id])
+        XCTAssertTrue(matches[first.id]?.contains("Omarchy") == true)
+        let none = await index.search("kubernetes")
+        XCTAssertTrue(none.isEmpty)
+
+        let afterStore = await index.staleSessions(in: [first, session(second.sessionID, updated: 300)])
+        XCTAssertEqual(afterStore.map(\.sessionID), [second.sessionID])
+
+        await index.removeAll(except: [second.id])
+        let afterRemoval = await index.search("omarchy")
+        XCTAssertTrue(afterRemoval.isEmpty)
+    }
+
+    func testCodexProviderReadsCompressedSessions() throws {
+        try XCTSkipIf(SessionFileData.zstdExecutable == nil, "zstd is not installed")
+        let fixture = try FixtureDirectory()
+        let id = "019cb93e-8e02-78d3-9d92-3ec6889ce48e"
+        let plain = fixture.url.appendingPathComponent("rollout-2026-03-04T06-26-50-\(id).jsonl")
+        try """
+        {"timestamp":"2026-03-04T14:26:50Z","type":"session_meta","payload":{"id":"\(id)","cwd":"/tmp/old"}}
+        {"timestamp":"2026-03-04T14:26:51Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Plan the March launch"}]}}
+        """.write(to: plain, atomically: true, encoding: .utf8)
+        let compress = Process()
+        compress.executableURL = SessionFileData.zstdExecutable
+        compress.arguments = ["-q", "--rm", plain.path]
+        try compress.run()
+        compress.waitUntilExit()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: plain.path))
+
+        let sessions = try CodexProvider(roots: [fixture.url], indexURL: fixture.url.appendingPathComponent("none.jsonl")).sessions()
+        XCTAssertEqual(sessions.map(\.sessionID), [id])
+        XCTAssertEqual(sessions.first?.title, "Plan the March launch")
+        XCTAssertEqual(sessions.first?.sourceURL.pathExtension, "zst")
+    }
+
     func testOpenCodeLegacyProviderReadsStructuredSession() throws {
         let fixture = try FixtureDirectory()
         let sessionRoot = fixture.url.appendingPathComponent("storage/session/global", isDirectory: true)

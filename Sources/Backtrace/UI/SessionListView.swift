@@ -42,6 +42,14 @@ struct SessionListView: View {
                                 Button("Copy Resume Command") {
                                     store.copyResumeCommand(for: session)
                                 }
+                                Button("Copy Session ID") {
+                                    store.copySessionID(for: session)
+                                }
+                                Button(store.sharedSessions[session.id] == nil ? "Share Link (Secret Gist)" : "Copy Shared Link") {
+                                    Task { await store.shareSession(session) }
+                                }
+                                ResumeWithMenu(session: session)
+                                ContinueInMenu(session: session)
                                 Button(store.isFavorite(session) ? "Unpin Session" : "Pin Session") {
                                     store.toggleFavorite(session)
                                 }
@@ -49,8 +57,11 @@ struct SessionListView: View {
                                     sessionForTagEditing = session
                                 }
                                 Divider()
-                                Button("Reveal Transcript in Finder") {
-                                    NSWorkspace.shared.activateFileViewerSelecting([session.sourceURL])
+                                Button("Show Session File in Finder") {
+                                    store.showSessionFileInFinder(session)
+                                }
+                                Button("Copy Session File Path") {
+                                    store.copySessionFilePath(for: session)
                                 }
                             }
                     }
@@ -59,6 +70,7 @@ struct SessionListView: View {
             }
         }
         .navigationTitle(title)
+        .navigationSubtitle(store.indexStatus ?? "")
         .searchable(text: $store.searchText, placement: .toolbar, prompt: "Title, tag, folder, branch, or ID")
         .toolbar {
             ToolbarItem {
@@ -112,10 +124,14 @@ private struct SessionRow: View {
                             .foregroundStyle(session.assistant.color)
                     }
                     Spacer(minLength: 4)
-                    SessionDateText(date: session.updatedAt, style: .relative)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                    if session.isActive() {
+                        ActiveBadge(machine: nil)
+                    } else {
+                        SessionDateText(date: session.updatedAt, style: .relative)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                 }
 
                 HStack(spacing: 6) {
@@ -123,6 +139,10 @@ private struct SessionRow: View {
                     if let branch = session.gitBranch, !branch.isEmpty {
                         Text("·")
                         Label(branch, systemImage: "arrow.triangle.branch")
+                    }
+                    if let machine = store.machine(for: session) {
+                        Text("·")
+                        Label(machine.name, systemImage: "laptopcomputer")
                     }
                 }
                 .font(.caption)
@@ -142,7 +162,12 @@ private struct SessionRow: View {
                     }
                 }
 
-                if let summary = session.summary, summary != session.title {
+                if !store.searchText.isEmpty, let excerpt = store.contentMatches[session.id], !excerpt.isEmpty {
+                    Label(excerpt, systemImage: "text.magnifyingglass")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else if let summary = session.summary, summary != session.title {
                     Text(summary)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
@@ -156,5 +181,25 @@ private struct SessionRow: View {
 
     private var sessionTags: [SessionTag] {
         store.tags(for: session)
+    }
+}
+
+/// Resumes a session in a new terminal tab with the assistant's executable
+/// or any shell alias that starts it.
+private struct ResumeWithMenu: View {
+    @EnvironmentObject private var store: SessionStore
+    let session: AssistantSession
+
+    var body: some View {
+        Menu("Resume in Terminal With") {
+            Button(session.assistant.executableName) {
+                Task { await store.resumeInTerminal(session, launcher: nil) }
+            }
+            ForEach(store.launchers(for: session.assistant)) { alias in
+                Button(alias.name) {
+                    Task { await store.resumeInTerminal(session, launcher: alias.name) }
+                }
+            }
+        }
     }
 }

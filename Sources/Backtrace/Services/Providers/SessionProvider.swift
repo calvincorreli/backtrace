@@ -50,6 +50,24 @@ enum FileMetadata {
 }
 
 enum SessionText {
+    /// Older Codex versions record a conversation as `user_message` and
+    /// `agent_message` events. Newer ones record `message` response items
+    /// with a role, and some files hold both forms of the same message.
+    static func codexRole(of object: [String: Any]) -> TranscriptRole? {
+        guard let payload = object["payload"] as? [String: Any] else { return nil }
+        switch payload["type"] as? String {
+        case "user_message": return .user
+        case "agent_message": return .assistant
+        case "message" where object["type"] as? String == "response_item":
+            switch payload["role"] as? String {
+            case "user": return .user
+            case "assistant": return .assistant
+            default: return nil
+            }
+        default: return nil
+        }
+    }
+
     static func firstPrompt(in objects: [[String: Any]], assistant: AssistantKind) -> String? {
         for object in objects {
             if let value = messageText(from: object, assistant: assistant, requestedRole: .user),
@@ -68,14 +86,14 @@ enum SessionText {
         switch assistant {
         case .codex:
             guard let payload = object["payload"] as? [String: Any] else { return nil }
-            let payloadType = payload["type"] as? String
-            let role: TranscriptRole?
-            switch payloadType {
-            case "user_message": role = .user
-            case "agent_message": role = .assistant
-            default: role = nil
+            guard let role = codexRole(of: object),
+                  requestedRole == nil || requestedRole == role else { return nil }
+            if payload["type"] as? String == "message" {
+                // Codex also records the context it injects as user messages.
+                guard let text = JSONValue.textContent(payload["content"]),
+                      role != .user || text.isUsefulPrompt else { return nil }
+                return text
             }
-            guard let role, requestedRole == nil || requestedRole == role else { return nil }
             return JSONValue.string(payload, keys: ["message", "text"])
 
         case .claude:

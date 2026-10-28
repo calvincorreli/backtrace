@@ -6,7 +6,7 @@ enum JSONLReader {
         prefixBytes: Int = 98_304,
         suffixBytes: Int = 65_536
     ) throws -> [[String: Any]] {
-        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        let data = try SessionFileData.read(url)
         guard !data.isEmpty else { return [] }
 
         if data.count <= prefixBytes + suffixBytes {
@@ -31,7 +31,7 @@ enum JSONLReader {
         until shouldStop: ([String: Any], Int) -> Bool = { _, _ in false }
     ) throws -> ([[String: Any]], Bool) {
         try Task.checkCancellation()
-        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        let data = try SessionFileData.read(url)
         try Task.checkCancellation()
         var values: [[String: Any]] = []
         var lineStart = data.startIndex

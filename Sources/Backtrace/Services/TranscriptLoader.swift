@@ -2,6 +2,8 @@ import Foundation
 
 struct TranscriptLoader: Sendable {
     let installations: [AssistantInstallation]
+    /// The preview shows the start of a session; a handoff needs all of it.
+    var messageLimit = 160
 
     func load(_ session: AssistantSession) async -> TranscriptPreview {
         let worker = Task.detached(priority: .userInitiated) {
@@ -35,7 +37,7 @@ struct TranscriptLoader: Sendable {
             if SessionText.messageText(from: object, assistant: session.assistant) != nil {
                 messageCount += 1
             }
-            return Task.isCancelled || messageCount >= 160
+            return Task.isCancelled || messageCount >= messageLimit
         }
         try Task.checkCancellation()
         var entries: [TranscriptEntry] = []
@@ -44,6 +46,10 @@ struct TranscriptLoader: Sendable {
             guard let text = SessionText.messageText(from: object, assistant: session.assistant)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !text.isEmpty else { continue }
             let role = role(for: object, assistant: session.assistant) ?? .system
+            // Codex can record one message as both an event and a response item.
+            if let previous = entries.last(where: { $0.role == role }), previous.text == text.clipped(to: 8_000) {
+                continue
+            }
             entries.append(TranscriptEntry(
                 id: "\(session.id):\(index)",
                 role: role,
@@ -68,7 +74,7 @@ struct TranscriptLoader: Sendable {
             objects = array
         }
         var entries: [TranscriptEntry] = []
-        for (index, object) in objects.prefix(160).enumerated() {
+        for (index, object) in objects.prefix(messageLimit).enumerated() {
             try Task.checkCancellation()
             guard let text = SessionText.messageText(from: object, assistant: .grok), !text.isEmpty else { continue }
             entries.append(TranscriptEntry(
@@ -78,7 +84,7 @@ struct TranscriptLoader: Sendable {
                 timestamp: FlexibleDateParser.parse(object["timestamp"])
             ))
         }
-        return TranscriptPreview(entries: entries, isTruncated: objects.count > 160)
+        return TranscriptPreview(entries: entries, isTruncated: objects.count > messageLimit)
     }
 
     private func loadOpenCodeLegacy(_ session: AssistantSession) throws -> TranscriptPreview {
@@ -104,7 +110,7 @@ struct TranscriptLoader: Sendable {
         }
 
         var entries: [TranscriptEntry] = []
-        for (index, pair) in messages.prefix(160).enumerated() {
+        for (index, pair) in messages.prefix(messageLimit).enumerated() {
             try Task.checkCancellation()
             let message = pair.0
             guard let messageID = message["id"] as? String,
@@ -128,7 +134,7 @@ struct TranscriptLoader: Sendable {
                 timestamp: created
             ))
         }
-        return TranscriptPreview(entries: entries, isTruncated: messages.count > 160)
+        return TranscriptPreview(entries: entries, isTruncated: messages.count > messageLimit)
     }
 
     private func loadOpenCodeCLI(_ session: AssistantSession) async throws -> TranscriptPreview {
@@ -147,7 +153,7 @@ struct TranscriptLoader: Sendable {
 
         let messages = root["messages"] as? [[String: Any]] ?? []
         var entries: [TranscriptEntry] = []
-        for (index, wrapper) in messages.prefix(160).enumerated() {
+        for (index, wrapper) in messages.prefix(messageLimit).enumerated() {
             try Task.checkCancellation()
             let info = wrapper["info"] as? [String: Any] ?? wrapper
             let roleString = info["role"] as? String ?? "system"
@@ -164,18 +170,13 @@ struct TranscriptLoader: Sendable {
                 timestamp: FlexibleDateParser.parse((info["time"] as? [String: Any])?["created"])
             ))
         }
-        return TranscriptPreview(entries: entries, isTruncated: messages.count > 160)
+        return TranscriptPreview(entries: entries, isTruncated: messages.count > messageLimit)
     }
 
     private func role(for object: [String: Any], assistant: AssistantKind) -> TranscriptRole? {
         switch assistant {
         case .codex:
-            guard let payload = object["payload"] as? [String: Any] else { return nil }
-            switch payload["type"] as? String {
-            case "user_message": return .user
-            case "agent_message": return .assistant
-            default: return nil
-            }
+            return SessionText.codexRole(of: object)
         case .claude:
             switch object["type"] as? String {
             case "user": return .user

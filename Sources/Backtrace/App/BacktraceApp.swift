@@ -9,7 +9,11 @@ struct BacktraceApp: App {
     init() {
         let settings = SettingsStore()
         _settings = StateObject(wrappedValue: settings)
-        _store = StateObject(wrappedValue: SessionStore(settings: settings))
+        _store = StateObject(wrappedValue: SessionStore(
+            settings: settings,
+            machineResolver: SyncthingMachineResolver.detect(),
+            searchIndex: SearchIndex.standard()
+        ))
     }
 
     var body: some Scene {
@@ -35,6 +39,22 @@ struct BacktraceApp: App {
                     }
                 }
                 .keyboardShortcut("c", modifiers: [.command, .shift])
+                .disabled(store.selectedSession == nil)
+
+                Button("Copy Session ID") {
+                    if let session = store.selectedSession {
+                        store.copySessionID(for: session)
+                    }
+                }
+                .keyboardShortcut("c", modifiers: [.command, .option])
+                .disabled(store.selectedSession == nil)
+
+                Button("Show Session File in Finder") {
+                    if let session = store.selectedSession {
+                        store.showSessionFileInFinder(session)
+                    }
+                }
+                .keyboardShortcut("r", modifiers: [.command, .option])
                 .disabled(store.selectedSession == nil)
             }
         }

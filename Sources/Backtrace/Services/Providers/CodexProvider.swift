@@ -21,14 +21,30 @@ struct CodexProvider: SessionProvider {
 
         for root in roots {
             let isArchived = root.lastPathComponent == "archived_sessions"
-            for url in FileMetadata.files(below: root, extensions: ["jsonl"]) {
-                guard let session = try? session(at: url, titles: titles, isArchived: isArchived) else {
+            for url in FileMetadata.files(below: root, extensions: ["jsonl", "zst"]) where SessionFileData.isSessionLog(url) {
+                guard let session = cachedSession(at: url, titles: titles, isArchived: isArchived) else {
                     continue
                 }
                 result.append(session)
             }
         }
         return result
+    }
+
+    /// Compressed sessions cost a decompression to read, and Codex does not
+    /// change them after compressing, so each one is parsed once per launch.
+    private func cachedSession(at url: URL, titles: [String: String], isArchived: Bool) -> AssistantSession? {
+        guard url.pathExtension == "zst" else {
+            return try? session(at: url, titles: titles, isArchived: isArchived)
+        }
+        let file = FileMetadata.values(for: url)
+        let key = "\(url.path)|\(file.modified.timeIntervalSince1970)|\(file.size)|\(isArchived)"
+        if let cached = CompressedSessionCache.shared.value(for: key) {
+            return cached.retitled(titles[cached.sessionID])
+        }
+        guard let parsed = try? session(at: url, titles: titles, isArchived: isArchived) else { return nil }
+        CompressedSessionCache.shared.set(parsed, for: key)
+        return parsed
     }
 
     private func titleIndex() -> [String: String] {
@@ -52,8 +68,10 @@ struct CodexProvider: SessionProvider {
         guard let metadata = objects.first(where: { ($0["type"] as? String) == "session_meta" }),
               let payload = metadata["payload"] as? [String: Any] else { return nil }
 
-        let id = JSONValue.string(payload, keys: ["id", "session_id"])
-            ?? idFromFilename(url.deletingPathExtension().lastPathComponent)
+        let filename = url.lastPathComponent
+            .replacingOccurrences(of: ".zst", with: "")
+            .replacingOccurrences(of: ".jsonl", with: "")
+        let id = JSONValue.string(payload, keys: ["id", "session_id"]) ?? idFromFilename(filename)
         guard let id else { return nil }
 
         let prompt = SessionText.firstPrompt(in: objects, assistant: .codex)
@@ -100,5 +118,40 @@ struct CodexProvider: SessionProvider {
     private func fallbackTitle(projectPath: String?) -> String {
         guard let projectPath else { return "Untitled Codex session" }
         return "\(URL(fileURLWithPath: projectPath).lastPathComponent) session"
+    }
+}
+
+private final class CompressedSessionCache: @unchecked Sendable {
+    static let shared = CompressedSessionCache()
+
+    private let lock = NSLock()
+    private var values: [String: AssistantSession] = [:]
+
+    func value(for key: String) -> AssistantSession? {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[key]
+    }
+
+    func set(_ session: AssistantSession, for key: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        values[key] = session
+    }
+}
+
+private extension AssistantSession {
+    /// Codex can rename a thread after its file is compressed.
+    func retitled(_ indexedTitle: String?) -> AssistantSession {
+        guard let indexedTitle = indexedTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !indexedTitle.isEmpty, indexedTitle != title else { return self }
+        var copy = AssistantSession(
+            assistant: assistant, sessionID: sessionID, title: indexedTitle, summary: summary,
+            projectPath: projectPath, gitBranch: gitBranch, model: model, createdAt: createdAt,
+            updatedAt: updatedAt, messageCount: messageCount, fileSize: fileSize, sourceURL: sourceURL,
+            sourceFormat: sourceFormat, isArchived: isArchived
+        )
+        copy.configDirectory = configDirectory
+        return copy
     }
 }
