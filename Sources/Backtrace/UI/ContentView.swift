@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var store: SessionStore
+    @EnvironmentObject private var updater: AppUpdater
     private let refreshTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -22,6 +23,20 @@ struct ContentView: View {
         }
         .task {
             await store.refresh()
+        }
+        .task {
+            await updater.checkPeriodically()
+        }
+        .toolbar {
+            if updater.availableUpdate != nil || updater.state == .updating {
+                ToolbarItem(placement: .primaryAction) {
+                    UpdateToolbarButton()
+                }
+            }
+        }
+        .sheet(isPresented: $updater.isShowingUpdate) {
+            UpdateSheet()
+                .environmentObject(updater)
         }
         .onReceive(refreshTimer) { _ in
             Task { await store.refresh() }

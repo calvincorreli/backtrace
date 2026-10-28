@@ -5,6 +5,7 @@ import SwiftUI
 struct BacktraceApp: App {
     @StateObject private var settings: SettingsStore
     @StateObject private var store: SessionStore
+    @StateObject private var updater = AppUpdater()
 
     init() {
         let settings = SettingsStore()
@@ -21,12 +22,20 @@ struct BacktraceApp: App {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(settings)
+                .environmentObject(updater)
                 .frame(minWidth: 980, minHeight: 620)
                 .preferredColorScheme(settings.appearance.preferredColorScheme)
         }
         .defaultSize(width: 1_220, height: 780)
         .windowStyle(.titleBar)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    Task { await updater.check(userInitiated: true) }
+                }
+                .disabled(updater.state == .checking || updater.state == .updating)
+            }
+
             CommandGroup(after: .newItem) {
                 Button("Refresh Sessions") {
                     Task { await store.refresh() }
@@ -63,6 +72,7 @@ struct BacktraceApp: App {
             SettingsView()
                 .environmentObject(store)
                 .environmentObject(settings)
+                .environmentObject(updater)
                 .preferredColorScheme(settings.appearance.preferredColorScheme)
         }
     }

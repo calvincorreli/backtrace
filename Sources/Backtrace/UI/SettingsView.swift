@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var store: SessionStore
     @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var updater: AppUpdater
     @State private var isAddingConfigDirectory = false
 
     var body: some View {
@@ -68,6 +69,30 @@ struct SettingsView: View {
                     Text("Claude Code config directories")
                 } footer: {
                     Text("Claude Code reads one config directory at a time. Add the ones you use and Backtrace reads them together, setting `CLAUDE_CONFIG_DIR` in the resume command for any session outside the default directory. Backtrace reads only the directories listed here.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(updater.versionDescription)
+                            if let lastChecked = updater.lastChecked {
+                                Text("Last checked \(lastChecked.formatted(date: .omitted, time: .shortened))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button("Check for Updates…") {
+                            Task { await updater.check(userInitiated: true) }
+                        }
+                        .disabled(updater.state == .checking || updater.state == .updating)
+                    }
+                } header: {
+                    Text("Updates")
+                } footer: {
+                    Text("Backtrace checks GitHub every few hours. An update pulls the new code into its source folder, builds it, and restarts the app.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

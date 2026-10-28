@@ -641,6 +641,38 @@ final class BacktraceCoreTests: XCTestCase {
         XCTAssertEqual(session(.openCode).resumeCommand(launcher: nil), "cd '/tmp/p' && opencode --session 'abc12345'")
     }
 
+    func testSourceUpdaterListsCommitsTheRunningAppDoesNotHave() throws {
+        let fixture = try FixtureDirectory()
+        func git(_ arguments: [String], in directory: URL) throws -> String {
+            let result = try XCTUnwrap(ProcessRunner.run(
+                executable: SourceUpdater.git,
+                arguments: ["-c", "user.name=Test", "-c", "user.email=test@example.com"] + arguments,
+                currentDirectory: directory
+            ))
+            XCTAssertEqual(result.status, 0, result.text)
+            return result.text
+        }
+        let remote = fixture.url.appendingPathComponent("remote.git")
+        let checkout = fixture.url.appendingPathComponent("checkout")
+        let other = fixture.url.appendingPathComponent("other")
+        _ = try git(["init", "--quiet", "--bare", "--initial-branch=main", remote.path], in: fixture.url)
+        _ = try git(["clone", "--quiet", remote.path, checkout.path], in: fixture.url)
+        _ = try git(["commit", "--quiet", "--allow-empty", "-m", "First"], in: checkout)
+        _ = try git(["push", "--quiet", "-u", "origin", "main"], in: checkout)
+        let built = SourceBuild(directory: checkout, commit: try git(["rev-parse", "HEAD"], in: checkout))
+
+        XCTAssertNil(try SourceUpdater.check(built))
+
+        _ = try git(["clone", "--quiet", remote.path, other.path], in: fixture.url)
+        _ = try git(["commit", "--quiet", "--allow-empty", "-m", "Add self-update"], in: other)
+        _ = try git(["commit", "--quiet", "--allow-empty", "-m", "Fix titles"], in: other)
+        _ = try git(["push", "--quiet"], in: other)
+
+        let update = try XCTUnwrap(SourceUpdater.check(built))
+        XCTAssertEqual(update.changes, ["Fix titles", "Add self-update"])
+        XCTAssertEqual(update.commit, try git(["rev-parse", "HEAD"], in: other))
+    }
+
     func testSearchIndexFindsWordsInsideConversationsAndTracksChanges() async throws {
         let fixture = try FixtureDirectory()
         let index = SearchIndex(url: fixture.url.appendingPathComponent("index.sqlite"))
